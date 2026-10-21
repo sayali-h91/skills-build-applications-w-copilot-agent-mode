@@ -39,11 +39,14 @@ export async function createActivity(input: unknown) {
     throw serviceError(400, 'Minutes must be a positive number');
   }
 
-  const [userExists, teamExists] = await Promise.all([
-    User.exists({ _id: userId }),
-    Team.exists({ _id: teamId }),
+  const [user, team] = await Promise.all([
+    User.findById(userId).select('team').lean(),
+    Team.findById(teamId).select('members').lean(),
   ]);
-  if (!userExists || !teamExists) throw serviceError(404, 'User or team was not found');
+  if (!user || !team) throw serviceError(404, 'User or team was not found');
+  const isAssignedTeam = user.team?.toString() === teamId.toLowerCase();
+  const isTeamMember = team.members.some((member) => member.toString() === userId.toLowerCase());
+  if (!isAssignedTeam || !isTeamMember) throw serviceError(400, 'User must belong to the selected team');
 
   return Activity.create({
     user: new Types.ObjectId(userId),
@@ -69,13 +72,23 @@ export async function createTeam(input: unknown) {
     throw serviceError(400, 'Members must be an array of valid user IDs');
   }
 
-  const memberIds = [...new Set(members)];
+  const memberIds = [...new Set(members.map((memberId: string) => memberId.toLowerCase()))];
   if (memberIds.length > 0) {
     const existingMemberCount = await User.countDocuments({ _id: { $in: memberIds } });
     if (existingMemberCount !== memberIds.length) throw serviceError(404, 'One or more team members were not found');
   }
 
-  return Team.create({ name: name.trim(), mascot: mascot.trim(), members: memberIds });
+  const team = await Team.create({ name: name.trim(), mascot: mascot.trim(), members: memberIds });
+  if (memberIds.length > 0) {
+    await Promise.all([
+      Team.updateMany(
+        { _id: { $ne: team._id }, members: { $in: memberIds } },
+        { $pull: { members: { $in: memberIds } } },
+      ),
+      User.updateMany({ _id: { $in: memberIds } }, { $set: { team: team._id } }),
+    ]);
+  }
+  return team;
 }
 
 export async function getLeaderboard() {
